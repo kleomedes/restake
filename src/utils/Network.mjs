@@ -1,104 +1,161 @@
 import _ from 'lodash'
+import { multiply, pow, format, bignumber } from 'mathjs'
+import {
+  GasPrice,
+} from "@cosmjs/stargate";
 import QueryClient from './QueryClient.mjs'
-import SigningClient from './SigningClient.mjs'
-import ApyClient from '../ApyClient.mjs'
+import Validator from './Validator.mjs'
 import Operator from './Operator.mjs'
 import Chain from './Chain.mjs'
 import CosmosDirectory from './CosmosDirectory.mjs'
-import DesmosSigningClient from './DesmosSigningClient.mjs'
 
-const Network = async (data, withoutQueryClient) => {
-  const SIGNERS = {
-    desmos: DesmosSigningClient
-  }
+class Network {
+  constructor(data, operatorAddresses) {
+    this.data = data
+    this.enabled = data.enabled
+    this.experimental = data.experimental
+    this.operatorAddresses = operatorAddresses || {}
+    this.operatorCount = data.operators?.length || this.estimateOperatorCount()
+    this.name = data.path || data.name
+    this.path = data.path || data.name
+    this.image = data.image
+    this.prettyName = data.prettyName || data.pretty_name
+    this.default = data.default
+    this.testnet = data.testnet || data.network_type === 'testnet'
+    this.setChain(this.data)
 
-  const chain = await Chain(data)
-  const directory = CosmosDirectory()
-  const operators = data.operators || (await directory.getOperators(data.name)).map(el => {
-    return {
-      address: el.address,
-      botAddress: el.restake.address,
-      runTime: el.restake.run_time,
-      minimumReward: el.restake.minimum_reward
-    }
-  })
+    this.directory = CosmosDirectory(this.testnet)
+    this.rpcUrl = this.directory.rpcUrl(this.name) // only used for Keplr suggestChain
+    this.restUrl = data.restUrl || this.directory.restUrl(this.name)
 
-  const rpcUrl = data.rpcUrl || directory.rpcUrl(data.name)
-  const restUrl = data.restUrl || directory.restUrl(data.name)
-
-  let queryClient
-  if(!withoutQueryClient){
-    queryClient = await QueryClient(chain.chainId, rpcUrl, restUrl)
-  }
-
-  const signingClient = (wallet, key) => {
-    if(!queryClient) return 
-
-    const gasPrice = data.gasPrice || '0.0025' + chain.denom
-    const client = SIGNERS[data.name] || SigningClient
-    return client(queryClient.rpcUrl, gasPrice, wallet, key)
-  }
-
-  const apyClient = queryClient && ApyClient(chain, queryClient.rpcUrl, queryClient.restUrl)
-
-  const getOperator = (operators, operatorAddress) => {
-    return operators.find(elem => elem.address === operatorAddress)
-  }
-
-  const getOperatorByBotAddress = (operators, botAddress) => {
-    return operators.find(elem => elem.botAddress === botAddress)
-  }
-
-  const getOperators = (validators) => {
-    return sortOperators().map(operator => {
-      const validator = validators[operator.address]
-      return Operator(operator, validator)
+    this.usingDirectory = !![this.restUrl].find(el => {
+      const match = el => el.match("cosmos.directory")
+      if (Array.isArray(el)) {
+        return el.find(match)
+      } else {
+        return match(el)
+      }
     })
+    this.online = !this.usingDirectory || this.connectedDirectory()
   }
 
-  const sortOperators = () => {
-    const random = _.shuffle(operators)
-    if(data.ownerAddress){
-      return _.sortBy(random, ({address}) => address === data.ownerAddress ? 0 : 1)
+  connectedDirectory() {
+    const proxy_status = this.chain ? this.chain['proxy_status'] : this.data['proxy_status']
+    return proxy_status && ['rest'].every(type => proxy_status[type])
+  }
+
+  estimateOperatorCount() {
+    if(!this.operatorAddresses) return 0
+    return Object.keys(this.operatorAddresses).filter(el => this.allowOperator(el)).length
+  }
+
+  allowOperator(address){
+    const allow = this.data.allowOperators
+    const block = this.data.blockOperators
+    if(allow && !allow.includes(address)) return false
+    if(block && block.includes(address)) return false
+    return true
+  }
+
+  async load() {
+    const chainData = await this.directory.getChainData(this.data.name);
+    this.setChain({...this.data, ...chainData})
+    this.validators = (await this.directory.getValidators(this.name)).map(data => {
+      return Validator(this, data)
+    })
+    this.operators = (this.data.operators || this.validators.filter(el => el.restake && this.allowOperator(el.operator_address))).map(data => {
+      return Operator(this, data)
+    })
+    this.operatorCount = this.operators.length
+  }
+
+  async setChain(data){
+    this.chain = Chain(data)
+    this.prettyName = this.chain.prettyName
+    this.chainId = this.chain.chainId
+    this.prefix = this.chain.prefix
+    this.slip44 = this.chain.slip44
+    this.assets = this.chain.assets
+    this.baseAsset = this.chain.baseAsset
+    this.denom = this.chain.denom
+    this.display = this.chain.display
+    this.symbol = this.chain.symbol
+    this.decimals = this.chain.decimals
+    this.image = this.chain.image
+    this.coinGeckoId = this.chain.coinGeckoId
+    this.estimatedApr = this.chain.estimatedApr
+    this.apyEnabled = data.apyEnabled !== false && !!this.estimatedApr && this.estimatedApr > 0
+    this.ledgerSupport = this.chain.ledgerSupport ?? true
+    this.authzSupport = this.chain.authzSupport
+    this.authzAminoSupport = this.chain.authzAminoSupport
+    this.defaultGasPrice = this.decimals && format(bignumber(multiply(0.000000025, pow(10, this.decimals))), { notation: 'fixed', precision: 4}) + this.denom
+    this.gasPrice = this.data.gasPrice || this.defaultGasPrice
+    if(this.gasPrice){
+      this.gasPriceAmount = GasPrice.fromString(this.gasPrice).amount.toString()
+      this.gasPriceStep = this.data.gasPriceStep || {
+        "low": multiply(this.gasPriceAmount, 0.5),
+        "average": multiply(this.gasPriceAmount, 1),
+        "high": multiply(this.gasPriceAmount, 2)
+      }
+    }
+    this.gasPricePrefer = this.data.gasPricePrefer
+    this.gasModifier = this.data.gasModifier || 1.5
+    this.txTimeout = this.data.txTimeout || 60_000
+  }
+
+  async connect(opts) {
+    try {
+      this.queryClient = await QueryClient(this.chain.chainId, this.restUrl, {
+        connectTimeout: opts?.timeout,
+        apiVersions: this.chain.apiVersions
+      })
+      this.restUrl = this.queryClient.restUrl
+      this.connected = this.queryClient.connected && (!this.usingDirectory || this.connectedDirectory())
+    } catch (error) {
+      console.log(error)
+      this.connected = false
+    }
+  }
+
+  async getApy(validators, operators){
+    let validatorApy = {};
+    for (const [address, validator] of Object.entries(validators)) {
+      const operator = operators.find((el) => el.address === address)
+      validatorApy[address] = validator.getAPY(operator)
+    }
+    return validatorApy;
+  }
+
+  getOperator(operatorAddress) {
+    return this.operators.find(elem => elem.address === operatorAddress)
+  }
+
+  getOperatorByBotAddress(botAddress) {
+    return this.operators.find(elem => elem.botAddress === botAddress)
+  }
+
+  getOperators() {
+    return this.sortOperators()
+  }
+
+  sortOperators() {
+    const random = _.shuffle(this.operators)
+    if (this.data.ownerAddress) {
+      return _.sortBy(random, ({ address }) => address === this.data.ownerAddress ? 0 : 1)
     }
     return random
   }
 
-  const getValidators = (opts) => {
+  getValidators(opts) {
     opts = opts || {}
-    opts.status = opts.status || 'BOND_STATUS_BONDED'
-    return queryClient.getAllValidators(150, opts)
-  }
-
-  return {
-    connected: queryClient && queryClient.connected,
-    enabled: data.enabled,
-    apyEnabled: data.apyEnabled,
-    name: data.name,
-    prettyName: chain.prettyName,
-    chainId: chain.chainId,
-    prefix: chain.prefix,
-    slip44: chain.slip44,
-    gasPrice: data.gasPrice,
-    denom: chain.denom,
-    symbol: chain.symbol,
-    decimals: chain.decimals,
-    image: chain.image,
-    coinGeckoId: chain.coinGeckoId,
-    testAddress: data.testAddress,
-    restUrl: queryClient && queryClient.restUrl,
-    rpcUrl: queryClient && queryClient.rpcUrl,
-    operators: operators,
-    authzSupport: chain.authzSupport,
-    data,
-    chain,
-    queryClient,
-    getApy: apyClient && apyClient.getApy,
-    signingClient,
-    getValidators,
-    getOperators,
-    getOperator,
-    getOperatorByBotAddress
+    return (this.validators || []).filter(validator => {
+      if (opts.status)
+        return validator.status === opts.status
+      return true
+    }).reduce(
+      (a, v) => ({ ...a, [v.operator_address]: v }),
+      {}
+    )
   }
 }
 

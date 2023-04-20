@@ -1,7 +1,7 @@
 # dev env
-FROM node:alpine
+FROM node:18-slim
 
-RUN apk add --update python3 make g++ && rm -rf /var/cache/apk/*
+RUN apt-get update && apt-get install -y python3 make g++
 
 ENV NODE_ENV=development
 
@@ -14,4 +14,4 @@ ENV DIRECTORY_PROTOCOL=https
 ENV DIRECTORY_DOMAIN=cosmos.directory
 
 EXPOSE 3000
-CMD npm run start
+CMD npm run autostake

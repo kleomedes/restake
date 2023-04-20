@@ -3,6 +3,7 @@ scripts/*
 !scripts/autostake.mjs
 !scripts/base.mjs
 !scripts/checkAuthz.mjs
+!scripts/dryrun.mjs
 
 # dependencies
 /node_modules
@@ -24,12 +25,6 @@ scripts/*
 .env.production.local
 
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
 .vim
-
-# Parcel related files
-dist/
-.cache
-.parcel-cache/
+.iml
